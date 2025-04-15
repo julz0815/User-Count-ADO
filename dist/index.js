@@ -17,27 +17,63 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const fs_1 = __nccwpck_require__(147);
-const host = "https://gitlab.com";
-const token = process.argv[2];
-if (!token) {
-    console.error('Error: Please provide a GitLab personal access token as an argument.');
+const organization = process.argv[2];
+const token = process.argv[3];
+if (!organization || !token) {
+    console.error('Error: Please provide the Azure DevOps organization name and personal access token as arguments.');
+    console.error('Usage: node dist/index.js <organization> <pat>');
     process.exit(1);
 }
-//const token = "YOUR TOKEN HERE";
-const maxRequestsPerMinute = 30; // Set your desired limit here
-// Function to fetch all repositories for a given organization with throttling
-function getAllRepositoriesWithThrottle(maxRequestsPerMinute) {
+const host = `https://dev.azure.com/${organization}`;
+const apiVersion = '7.1-preview.1';
+const maxRequestsPerMinute = 30;
+// Function to get all projects in the organization
+function getAllProjects() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const projects = [];
+        let continuationToken = undefined;
+        do {
+            const url = new URL(`${host}/_apis/projects`);
+            url.searchParams.append('api-version', apiVersion);
+            if (continuationToken) {
+                url.searchParams.append('continuationToken', continuationToken);
+            }
+            const response = yield fetch(url.toString(), {
+                headers: {
+                    'Authorization': `Basic ${Buffer.from(`:${token}`).toString('base64')}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+            if (!response.ok) {
+                console.error('Error fetching projects:', response.statusText);
+                break;
+            }
+            const data = yield response.json();
+            projects.push(...data.value);
+            // Get continuation token from response headers
+            continuationToken = response.headers.get('x-ms-continuation');
+        } while (continuationToken);
+        return projects;
+    });
+}
+// Function to fetch all repositories for a specific project with throttling
+function getProjectRepositories(projectId, maxRequestsPerMinute) {
     return __awaiter(this, void 0, void 0, function* () {
         const repositories = [];
-        const perPage = 100;
-        let page = 1;
+        let continuationToken = undefined;
         const maxRequestsPerSecond = maxRequestsPerMinute / 60;
         let remainingRequests = maxRequestsPerMinute;
-        while (true) {
+        do {
             const startTime = Date.now();
-            const response = yield fetch(`${host}/api/v4/projects?membership=true&per_page=${perPage}&page=${page}`, {
+            const url = new URL(`${host}/${projectId}/_apis/git/repositories`);
+            url.searchParams.append('api-version', apiVersion);
+            if (continuationToken) {
+                url.searchParams.append('continuationToken', continuationToken);
+            }
+            const response = yield fetch(url.toString(), {
                 headers: {
-                    'Authorization': `Bearer ${token}`
+                    'Authorization': `Basic ${Buffer.from(`:${token}`).toString('base64')}`,
+                    'Content-Type': 'application/json'
                 }
             });
             if (!response.ok) {
@@ -45,14 +81,12 @@ function getAllRepositoriesWithThrottle(maxRequestsPerMinute) {
                 break;
             }
             const data = yield response.json();
-            if (data.length === 0)
-                break;
-            for (let i = 0; i < data.length; i++) {
-                repositories.push({
-                    name: data[i].name,
-                    path_with_namespace: data[i].path_with_namespace,
-                    id: data[i].id
-                });
+            if (data.value) {
+                repositories.push(...data.value.map((repo) => ({
+                    name: repo.name,
+                    id: repo.id,
+                    project: repo.project.name
+                })));
             }
             remainingRequests--;
             if (remainingRequests === 0) {
@@ -63,32 +97,33 @@ function getAllRepositoriesWithThrottle(maxRequestsPerMinute) {
                 }
                 remainingRequests = maxRequestsPerMinute;
             }
-            console.log("Fetched repositories - page " + page);
-            page++;
-        }
+            // Get continuation token from response headers
+            continuationToken = response.headers.get('x-ms-continuation');
+        } while (continuationToken);
         return repositories;
     });
 }
 // Function to find all contributing users for a repository within the last 90 days
-function getContributors(repo_id, repo_name) {
+function getContributors(repo_id, repo_name, projectId) {
     return __awaiter(this, void 0, void 0, function* () {
         console.log('-Fetching commits for ' + repo_name);
-        // Get the date 90 days ago from now
         const ninetyDaysAgo = new Date();
         ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
-        // Format the date as required by the GitLab API (ISO 8601)
         const sinceDate = ninetyDaysAgo.toISOString();
-        // Initialize an empty array to store all contributors
         let allContributors = [];
-        // Initialize page number
-        let page = 1;
+        let skip = 0;
+        const top = 100;
         while (true) {
-            // Fetch commits since the specified date
-            let response;
             try {
-                response = yield fetch(`${host}/api/v4/projects/${encodeURIComponent(repo_id)}/repository/commits?since=${sinceDate}&page=${page}&per_page=100`, {
+                const url = new URL(`${host}/${projectId}/_apis/git/repositories/${repo_id}/commits`);
+                url.searchParams.append('api-version', apiVersion);
+                url.searchParams.append('searchCriteria.fromDate', sinceDate);
+                url.searchParams.append('$top', top.toString());
+                url.searchParams.append('$skip', skip.toString());
+                const response = yield fetch(url.toString(), {
                     headers: {
-                        'Authorization': `Bearer ${token}`
+                        'Authorization': `Basic ${Buffer.from(`:${token}`).toString('base64')}`,
+                        'Content-Type': 'application/json'
                     }
                 });
                 if (!response.ok) {
@@ -96,20 +131,18 @@ function getContributors(repo_id, repo_name) {
                     break;
                 }
                 const data = yield response.json();
-                if (data.length === 0) {
+                if (!data.value || data.value.length === 0) {
                     break;
                 }
-                else {
-                    allContributors = allContributors.concat(data);
-                    page++;
-                }
+                allContributors = allContributors.concat(data.value);
+                skip += top;
+                // Delay to respect rate limits
+                yield new Promise(resolve => setTimeout(resolve, 3000));
             }
             catch (error) {
                 console.log('-Error fetching contributors for ' + repo_name + ': ' + error);
                 break;
             }
-            // Delay the next request by 1 second to limit to 60 requests per minute
-            yield new Promise(resolve => setTimeout(resolve, 3000));
         }
         return allContributors;
     });
@@ -118,14 +151,14 @@ function getContributors(repo_id, repo_name) {
 function writeContributorsToCSV(repo, contributors) {
     return __awaiter(this, void 0, void 0, function* () {
         const filePath = 'repos/' + repo + '-contributors.csv';
-        var csvContent = JSON.stringify(contributors);
+        const csvContent = JSON.stringify(contributors);
         yield fs_1.promises.writeFile(filePath, csvContent, 'utf8');
         console.log(`---Commits have been written to ${filePath}\n`);
     });
 }
 function storeReposToFile(repositories, filePath) {
     return __awaiter(this, void 0, void 0, function* () {
-        const data = JSON.stringify(repositories, null, 2); // Convert to JSON with pretty print
+        const data = JSON.stringify(repositories, null, 2);
         yield fs_1.promises.writeFile(filePath, data, 'utf8');
         console.log(`Repositories have been written to ${filePath}`);
     });
@@ -137,25 +170,34 @@ function wait(ms) {
 }
 function getAllUsers() {
     return __awaiter(this, void 0, void 0, function* () {
+        // Create repos directory if it doesn't exist
+        yield fs_1.promises.mkdir('repos', { recursive: true });
         let repositories = [];
-        //check if the file repsitories.json exist
         const repositoriesExist = yield fs_1.promises.access('repositories.json')
             .then(() => true)
             .catch(() => false);
         if (repositoriesExist) {
-            console.log('File repositories.json exists - mo need to fetch again');
+            console.log('File repositories.json exists - no need to fetch again');
             const data = yield fs_1.promises.readFile('repositories.json', 'utf8');
             repositories = JSON.parse(data);
         }
         else {
-            repositories = yield getAllRepositoriesWithThrottle(maxRequestsPerMinute);
-            storeReposToFile(repositories, 'repositories.json');
+            // First get all projects
+            console.log('Fetching projects from organization...');
+            const projects = yield getAllProjects();
+            console.log(`Found ${projects.length} projects`);
+            // Then get repositories for each project
+            for (const project of projects) {
+                console.log(`Fetching repositories for project: ${project.name}`);
+                const projectRepos = yield getProjectRepositories(project.id, maxRequestsPerMinute);
+                repositories.push(...projectRepos.map(repo => (Object.assign(Object.assign({}, repo), { projectId: project.id }))));
+                yield wait(1000); // Small delay between projects
+            }
+            yield storeReposToFile(repositories, 'repositories.json');
         }
-        //fetch contributors per repo
         const numberOfRepos = repositories.length;
         console.log(numberOfRepos + ' repositories fetched');
         for (const repo of repositories) {
-            //wait 3 seconds before the next request to throttle
             yield wait(3000);
             console.log('Fetching contributors for ' + repo.name);
             const contributorFilesExist = yield fs_1.promises.access('repos/' + repo.name + '-contributors.csv')
@@ -165,7 +207,7 @@ function getAllUsers() {
                 console.log('Commits file for ' + repo.name + ' exists - no need to fetch again');
             }
             else {
-                const contributors = yield getContributors(repo.id, repo.name);
+                const contributors = yield getContributors(repo.id, repo.name, repo.projectId);
                 const numberOfContributors = contributors.length;
                 console.log('--Commits for ' + repo.name + ': ' + numberOfContributors);
                 yield writeContributorsToCSV(repo.name, contributors);
@@ -185,29 +227,32 @@ function getAllUsers() {
                 const countFromFile = contributors.length;
                 console.log('Contributors for ' + repo.name + ': ' + countFromFile);
                 if (countFromFile > 0) {
-                    for (let i = 0; i < countFromFile; i++) {
-                        const pattern = /[\w.-]+gitlab\.com/i;
-                        if (pattern.test(contributors[i].author_email)) {
-                            uniqueContributorsOthers.add(contributors[i].author_email);
-                        }
-                        else {
-                            uniqueContributors.add(contributors[i].author_email);
+                    for (const commit of contributors) {
+                        const email = commit.author.email;
+                        if (email) {
+                            const pattern = new RegExp(`${organization}\\.visualstudio\\.com|${organization}\\.azure\\.com`, 'i');
+                            if (pattern.test(email)) {
+                                uniqueContributorsOthers.add(email);
+                            }
+                            else {
+                                uniqueContributors.add(email);
+                            }
                         }
                     }
                 }
             }
         }
-        // Save unique contributors to a file
+        // Save unique contributors to files
         const contributorsFilePath = 'unique-contributors.txt';
-        const contrinutorsArray = Array.from(uniqueContributors);
-        const contributorsCount = contrinutorsArray.length;
-        const contributorsContent = 'Total number of unique contributors in the last 90 days: ' + contributorsCount + '\n' + contrinutorsArray.join('\n');
+        const contributorsArray = Array.from(uniqueContributors);
+        const contributorsCount = contributorsArray.length;
+        const contributorsContent = 'Total number of unique contributors in the last 90 days: ' + contributorsCount + '\n' + contributorsArray.join('\n');
         yield fs_1.promises.writeFile(contributorsFilePath, contributorsContent);
         console.log(`Unique contributors have been written to ${contributorsFilePath}`);
         const contributorsFilePathOthers = 'unique-contributors-others.txt';
-        const contrinutorsArrayOthers = Array.from(uniqueContributorsOthers);
-        const contributorsCountOthers = contrinutorsArrayOthers.length;
-        const contributorsContentOthers = 'Total number of unique contributors in the last 90 days: ' + contributorsCountOthers + '\n' + contrinutorsArrayOthers.join('\n');
+        const contributorsArrayOthers = Array.from(uniqueContributorsOthers);
+        const contributorsCountOthers = contributorsArrayOthers.length;
+        const contributorsContentOthers = 'Total number of unique contributors in the last 90 days: ' + contributorsCountOthers + '\n' + contributorsArrayOthers.join('\n');
         yield fs_1.promises.writeFile(contributorsFilePathOthers, contributorsContentOthers);
         console.log(`Unique contributors have been written to ${contributorsFilePathOthers}`);
     });
