@@ -1,30 +1,27 @@
-# Azure DevOps User Contribution Counter
+# Azure DevOps User Counter
 
-This tool analyzes repositories in your Azure DevOps organization to count unique contributors over the last 90 days. It separates internal (organization) contributors from external contributors and provides detailed statistics per repository.
+A tool to count unique contributors in Azure DevOps repositories over the last 90 days.
 
 ## Features
 
-- Fetches all projects and repositories from your Azure DevOps organization
-- Analyzes commit history for the last 90 days
-- Identifies and separates internal and external contributors
-- Implements rate limiting to respect Azure DevOps API constraints
-- Caches repository and commit data to avoid unnecessary API calls
-- Generates detailed reports of contributor statistics
+- Counts unique contributors across multiple repositories
+- Categorizes contributors by email domains
+- Supports interactive repository selection
+- Caches data for better performance
+- Configurable email domain patterns
+- Manual repository selection via JSON file
 
 ## Prerequisites
 
-- Node.js (v14 or higher)
-- TypeScript
-- Azure DevOps Personal Access Token (PAT) with the following permissions:
-  - Code (Read)
-  - Project and Team (Read)
+- Node.js version 14.0.0 or higher
+- Azure DevOps Personal Access Token (PAT) with appropriate permissions
 
 ## Installation
 
 1. Clone the repository:
 ```bash
 git clone <repository-url>
-cd <repository-name>
+cd user-count-ado
 ```
 
 2. Install dependencies:
@@ -32,52 +29,71 @@ cd <repository-name>
 npm install
 ```
 
-3. Compile TypeScript:
+## Building
+
+Build the project using ncc:
 ```bash
-npm run build
-# or
-tsc
+ncc buid src/index.ts
 ```
+
+This will create a bundled JavaScript file in the `dist` directory.
 
 ## Usage
 
-Run the script with your Azure DevOps organization name and Personal Access Token (PAT):
-
+Run the built JavaScript file:
 ```bash
-node dist/index.js <organization-name> <pat>
+node dist/index.js <organization> <pat> [options]
 ```
 
-Example:
-```bash
-node dist/index.js mycompany abc123def456...
-```
+### Arguments
+
+- `organization`: Your Azure DevOps organization name
+- `pat`: Your Azure DevOps Personal Access Token
+
+### Options
+
+- `--force-reload`: Force reload of repositories and clear cache
+- `--interactive`: Enable interactive repository selection mode
+- `--regex <pattern>`: Use custom regex pattern for email categorization
+- `--regex-file <file>`: Read regex pattern from file
+
+## Workflow
+
+1. **Initial Run**
+   - The script will fetch all repositories from your Azure DevOps organization
+   - Creates a `repositories.json` file with all repositories
+   - Each repository entry has a `selected` field (true/false)
+   - The script will pause and show instructions for adjusting the repository selection
+
+2. **Repository Selection**
+   - Open `repositories.json` in a text editor
+   - For each repository, set the `selected` field:
+     - `true`: Include the repository in the analysis
+     - `false`: Exclude the repository from the analysis
+   - Save the file and run the script again without `--force-reload`
+
+3. **Analysis**
+   - The script will process only the selected repositories
+   - Fetches commits from the last 90 days for each repository
+   - Categorizes contributors based on email domains
+   - Generates output files with the results
 
 ## Output Files
 
-The script generates several files:
+- `repositories.json`: List of all repositories with selection status
+- `repos/*-contributors.csv`: Individual CSV files for each repository's contributors
+- `committers-per-repo.txt`: List of committers per repository
+- `unique-contributors.txt`: List of unique contributors
+- `unique-contributors-others.txt`: List of unique contributors matching the regex pattern
 
-1. `repositories.json`
-   - Contains cached information about all repositories
-   - Used to avoid refetching repository data in subsequent runs
+## Important Notes
 
-2. `repos/` directory
-   - Contains individual CSV files for each repository
-   - Format: `{repository-name}-contributors.csv`
-   - Stores commit information for the last 90 days
+- The tool caches repository and commit data to improve performance
+- Use `--force-reload` to clear the cache and fetch fresh data
+- The analysis looks at commits from the last 90 days
+- The default regex pattern is `/microsoft\.com$/i` for categorizing contributors
+- You can use `--interactive` for a guided repository selection process
 
-3. `unique-contributors.txt`
-   - Lists all external contributors
-   - Includes total count and email addresses
+## License
 
-4. `unique-contributors-others.txt`
-   - Lists all internal contributors (from your organization's domain)
-   - Includes total count and email addresses
-
-## Rate Limiting
-
-The script implements rate limiting to respect Azure DevOps API constraints:
-- Maximum 30 requests per minute
-- 3-second delay between repository processing
-- Automatic throttling when approaching API limits
-
-## File Structure 
+ISC 
